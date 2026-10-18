@@ -1,0 +1,12 @@
+[package]
+name = "my-app"
+version = "1.0.0"
+edition = "2021"
+
+[dependencies]
+liblightos = { path = "../../liblightos" }
+
+[profile.release]
+panic = "abort"
+[profile.dev]
+panic = "abort"

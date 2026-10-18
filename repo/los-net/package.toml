@@ -1,0 +1,10 @@
+[package]
+name = "los-net"
+version = "0.1.0"
+description = "Network utilities"
+author = "LightOS Team"
+license = "MIT"
+verified = true
+
+[dependencies]
+los-core = "0.1.0"

@@ -1,0 +1,32 @@
+[package]
+name = "lightos"
+version = "0.4.0"
+edition = "2021"
+authors = ["LightOS Team (NEXA Laboratories)"]
+license = "MIT"
+description = "LightOS - a modern 64-bit operating system kernel written in Rust"
+
+[dependencies]
+bootloader = { version = "0.9", features = ["map_physical_memory"] }
+volatile = "0.2.6"
+spin = "0.9"
+x86_64 = "0.15"
+uart_16550 = "0.3"
+pic8259 = "0.11"
+pc-keyboard = "0.7"
+linked_list_allocator = "0.10"
+
+[dependencies.lazy_static]
+version = "1.4"
+features = ["spin_no_std"]
+
+[package.metadata.bootimage]
+# QEMU: debug/log output and the LOS package-server bridge go over COM1
+run-args = ["-serial", "stdio"]
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+opt-level = 2

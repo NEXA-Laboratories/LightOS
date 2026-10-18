@@ -1,0 +1,10 @@
+[package]
+name = "demo-app"
+version = "1.0.0"
+description = "Demo application"
+author = "Community"
+license = "MIT"
+verified = false
+
+[dependencies]
+los-core = "0.1.0"

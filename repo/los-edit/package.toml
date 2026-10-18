@@ -1,0 +1,10 @@
+[package]
+name = "los-edit"
+version = "0.1.0"
+description = "Text editor"
+author = "LightOS Team"
+license = "MIT"
+verified = true
+
+[dependencies]
+los-core = "0.1.0"

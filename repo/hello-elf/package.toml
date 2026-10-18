@@ -1,0 +1,10 @@
+[package]
+name = "hello-elf"
+version = "0.3.0"
+description = "Hello world ELF64 demo app"
+author = "LightOS Team"
+license = "MIT"
+verified = true
+
+[dependencies]
+los-core = "0.1.0"

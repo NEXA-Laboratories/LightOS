@@ -1,0 +1,2 @@
+los-core 0.1.0
+core utilities: echo, uptime, mem, ps

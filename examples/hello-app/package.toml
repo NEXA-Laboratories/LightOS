@@ -1,0 +1,9 @@
+[package]
+name = "my-app"
+version = "1.0.0"
+description = "My awesome application"
+author = "Your Name"
+license = "MIT"
+
+[dependencies]
+los-core = "0.1.0"

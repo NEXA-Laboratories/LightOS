@@ -1,0 +1,9 @@
+[package]
+name = "los-core"
+version = "0.1.0"
+description = "Core utilities"
+author = "LightOS Team"
+license = "MIT"
+verified = true
+
+[dependencies]
