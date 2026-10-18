@@ -4,369 +4,85 @@
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Rust](https://img.shields.io/badge/rust-nightly-orange)
 
-**LightOS** is a modern 64-bit operating system kernel written in Rust from scratch. The project demonstrates the power of Rust system programming and includes its own LOS package manager.
+LightOS is a 64-bit operating system kernel written in Rust from scratch, with its own package manager
+(**LOS**) and package server (**los-server**).
 
-## 🚀 Main features
+**New in 0.4.0 (networking, part 1)**
+- PCI scan (`pci`), Intel **e1000 network driver**, Ethernet/ARP/IPv4/ICMP: `ifconfig`, `ping`, `arp` (see `docs/NETWORK.md`)
+- VirtualBox VMs now get a NAT adapter (Intel PRO/1000 MT Desktop); UDP/DHCP/TCP/HTTP and `los update` over the network follow in 0.4.x
 
-### Core
-- ✅ **Memory Management** - Physical and virtual memory, heap allocator
-- ✅ **Process Management** - Multitasking, process scheduler
-- ✅ **Interrupt Handling** - IDT, CPU exception handling
-- ✅ **System Calls** - Interface for userspace applications
-- ✅ **VGA Driver** - Color text output
-- ✅ **Serial Port** - Debugging output via COM1
+**New in 0.3.1**
+- `edit <file>`: a real full-screen text editor (arrows, F2 save, Esc quit), provided by the `los-edit` package
+- wider tables (the `disks` table no longer cuts off lines)
 
-### LOS Package Manager
-- 📦 **Installing packages** - `los install <package>`
-- 🗑️ **Removing packages** - `los remove <package>`
-- 📋 **List of installed** - `los list`
-- 🔍 **Package Search** - `los search <query>`
-- 🔄 **Repository update** - `los update`
-- ✓ **Package Verification** - Security check before installation
-- 🔗 **Dependency Management** - Automatic installation
+**New in 0.3.0**
+- Runs in **VirtualBox** (BIOS + IDE) as well as QEMU: `scripts\vbox-create.ps1`, see `docs/VIRTUALBOX.md`
+- **System installer**: `install <disk>` copies LightOS (bootloader, kernel, files, packages) to another disk
+- **Partition system**: MBR editor (`disks`, `part list|new|delete|wipe|mkfs`), FAT32 formatter, `mount`/`unmount`
+- Up to 4 IDE disks, automatic mount of the first FAT32 volume (partition or raw)
+- Includes everything from 0.2.0: boot animation, FAT32, persistent packages, ELF apps
 
-### Security
-- ✓ Package verification before installation
-- ✓ Isolated application execution
-- ✓ Checking dependencies
- Warnings about unchecked packages
-
-## 📁 Project structure
-
+## Quick start: VirtualBox (Windows PowerShell)
+```powershell
+cd kernel
+cargo bootimage --release
+cd ..
+powershell -ExecutionPolicy Bypass -File scripts\vbox-create.ps1 -Force
+# start the VM "LightOS" in VirtualBox, then at los>:
+#   disks
+#   install 1        (type YES)
+#   shutdown
+powershell -ExecutionPolicy Bypass -File scripts\vbox-finish.ps1
 ```
-lightos/
-├── src/
-,── main.rs # The entry point of the core
-,── vga_buffer.rs # VGA driver
-│   ├── serial.rs         # Serial port
-,── interrupts.rs # Interrupt handling
-│   ├── gdt.rs            # Global Descriptor Table
-,── memory.rs # Memory management
-│   ├── allocator.rs      # Heap allocator
-,── process.rs # Process management
-,── syscall.rs # System calls
-,── task/ # Asynchronous tasks
-│   └── package.rs        # LOS Package Manager
-├── Cargo.toml
-├── x86_64-lightos.json   # Target specification
-└── README.md
+Start the VM again: it boots from its own disk.
+
+## Quick start: QEMU
+```powershell
+python tools\mkdisk.py data.img --root disk-root        # optional FAT32 data disk with sample files
+powershell -ExecutionPolicy Bypass -File scripts\run.ps1
 ```
+To try the installer in QEMU, create a blank disk (`qemu-img create -f raw target.img 1G`) and attach it as
+the second IDE disk instead of data.img (`-drive file=target.img,format=raw,if=ide,index=1`).
 
-## 🛠️ Build and launch
+## Shell commands
+| Area | Commands |
+|---|---|
+| System | `help clear echo ver uptime mem vtop reboot shutdown` |
+| Processes | `ps spawn run kill reap syscalls bp panic` |
+| Files | `ls cat write mkdir rm df exec edit` (edit needs `los install los-edit`) |
+| Network | `pci`, `ifconfig [ip mask gw]`, `ping <ip> [count]`, `arp` |
+| Disks | `disks`, `part list\|new\|delete\|wipe\|mkfs`, `mount [disk [part]]`, `unmount` |
+| Installer | `install <disk>` |
+| Packages | `los install\|remove\|list\|search\|update\|available\|info\|verify\|autoremove\|run` |
 
-### Requirements
-- Rust nightly (`rustup default nightly`)
-- `bootimage' crate: `cargo install bootimage'
-- QEMU for testing
-
-### Compilation
-```bash
-# Build the core
-cargo build --release
-
-# Create a boot image
-of cargo botimage
-
-# Launch in QEMU
-cargo run
+## Disk layout of an installed system
 ```
+LBA 0          boot sector (bootloader stage 1) + MBR partition table (bytes 446..509)
+LBA 1..16383   bootloader + kernel (8 MiB system area; partitions never start below it)
+LBA 16384..    partition 1: FAT32  (/LOS/DB.TXT package database, /BIN apps, your files)
+```
+Disk numbers = IDE position: 0 primary master (boot medium), 1 primary slave, 2 secondary master, 3 secondary slave.
 
-### Launching in QEMU
-```bash
-qemu-system-x86_64 -drive format=raw,file=target/x86_64-lightos/release/bootimage-lightos.bin
+## Layout of the source
+```
+kernel/src/   main animation logo | vga serial gdt interrupts | memory allocator | process syscall elf |
+              ata mbr fat32 installer | keyboard shell ui | los/ (package manager)
+liblightos/   userspace library      examples/hello-app/   example app
+server/       los_server.py + tests  repo/                 package repository
+tools/        gen_logo.py mkdisk.py mkelf.py mkboot.py     scripts/   PowerShell + sh helpers
+docs/         PROTOCOL.md VIRTUALBOX.md NETWORK.md
 ```
 
-## 📦 LOS Package Manager
+## Known limits of 0.4.0
+- **Not tested on real hardware or in VirtualBox by me**; the kernel code is written blind, so expect to
+  report a few compiler errors / crashes (that is how 0.1.0 and 0.2.0 got working).
+- IDE/PIO only: no SATA/AHCI, no NVMe, no USB storage. Use an IDE controller in VirtualBox.
+- BIOS boot only (no UEFI). MBR with up to 4 primary partitions; FAT32 only, 8.3 file names.
+- The installer needs the bootloader to leave bytes 446..509 of sector 0 free; `tools\mkboot.py` checks this
+  before you start. The target must be disk 1-3 (disk 0 is the live medium).
+- Apps still run in ring 0. Network: only ICMP so far (no DHCP/DNS/TCP yet); no USB.
 
-### Teams
+## Roadmap
+v0.4.x UDP/DHCP/DNS, TCP, HTTP, los update over the network · v0.5.0 AHCI/SATA, USB, ring-3 processes · v0.6.0 GUI framework, threads, SMP · v1.0.0 stable ABI, docs, package signing
 
-#### Package Installation
-```rust
-los install los-shell
-```
-
-#### Package Removal
-```rust
-los remove demo-app
-```
-
-#### List of installed packages
-```rust
-los list
-```
-Conclusion:
-``
-╔════════════════════════════════════════════════════════╗
-║              Installed Packages                       ║
-╠════════════════════════════════════════════════════════╣
-║ ✓ los-core-0.1.0    by LightOS Team
-║ ✓ los-shell-0.1.0   by LightOS Team
-╚════════════════════════════════════════════════════════╝
-```
-
-#### Package Search
-```rust
-los search editor
-```
-
-#### Updating the repository
-```rust
-los update
-```
-
-### Available packages
-
-| Package | Version | Description | Verified |
-|-------|--------|----------|----------|
-| `los-core` | 0.1.0 | Core utilities | ✓ |
-| `los-shell` | 0.1.0 | Command shell | ✓ |
-| `los-edit` | 0.1.0 | Text editor | ✓ |
-| `los-net` | 0.1.0 | Network utilities | ✓ |
-| `demo-app` | 1.0.0 | Demo application | ✗ |
-
-## 💻 Application Development
-
-### Creating an application for LightOS
-
-1. **Create a project**
-```bash
-cargo new --bin my-app
-```
-
-2. **Configure Cargo.toml**
-```toml
-[dependencies]
-liblightos = "0.1.0" # LightOS Standard Library
-
-[profile.release]
-panic = "abort"
-```
-
-3. **Write the code**
-```rust
-#![no_std]
-#![no_main]
-
-use liblightos::*;
-
-#[no_mangle]
-pub extern "C" fn _start() -> ! {
-    println!("Hello from LightOS app!");
-    
-    // System calls
-let pid = sys_getpid();
-println!("My PID: {}", pid);
-    
-    sys_exit(0);
-}
-```
-
-4. **Assemble**
-```bash
-cargo build --release --target x86_64-lightos
-```
-
-5. **Create a package manifest** (`package.toml`)
-``toml
-[package]
-name = "my-app"
-version = "1.0.0"
-description = "My awesome application"
-author = "Your Name"
-license = "MIT"
-
-[dependencies]
-los-core = "0.1.0"
-```
-
-6. **Publish**
-```bash
-los submit my-app
-```
-
-### System calls
-
-#### Basic challenges
-``rust
-// Text
-output sys_write(1, "Hello".as_ptr(), 5);
-
-// Get PID
-let pid = sys_getpid();
-
-// End the sys_exit process
-(0);
-``
-
-#### LOS-specific challenges
-``rust
-// Install the package programmatically
-sys_los_install("package-name".as_ptr(), 12);
-
-// Delete the package
-sys_los_remove("package-name".as_ptr(), 12);
-
-// Package list
-sys_los_list();
-``
-
-## 🎯 Demonstration for the conference
-
-### Ready-made scenarios
-
-####1. Booting the system
-```
-╔════════════════════════════════════════════╗
-║        LightOS v0.1.0 - Booting...       ║
-╚════════════════════════════════════════════╝
-[OK] GDT initialized
-[OK] IDT initialized
-[OK] PICs initialized
-[OK] Interrupts enabled
-[OK] Heap initialized
-[OK] Process manager initialized
-[OK] System calls initialized
-
-╔════════════════════════════════════════════╗
-║     LightOS Ready - Welcome to Shell      ║
-╚════════════════════════════════════════════╝
-```
-
-####2. Process Management
-```rust
-> ps
-╔════════════════════════════════════════════╗
-║            Process List                   ║
-╠════════════════════════════════════════════╣
-║ PID │ Name           │ State    │ Priority║
-╠════════════════════════════════════════════╣
-║   1 │ init           │ Running  │        5║
-║   2 │ los-shell      │ Ready    │        5║
-╚════════════════════════════════════════════╝
-```
-
-####3. Package Manager
-```rust
-> los install los-edit
-📦 Installing dependency: los-core
-✓  Successfully installed los-core
-📦 Installing los-edit-0.1.0
-   Author: LightOS Team
-   Description: Simple text editor
-✓  Successfully installed los-edit
-
-> los list
-╔════════════════════════════════════════════════════════╗
-║              Installed Packages                       ║
-╠════════════════════════════════════════════════════════╣
-║ ✓ los-core-0.1.0    by LightOS Team
-║ ✓ los-edit-0.1.0    by LightOS Team
-╚════════════════════════════════════════════════════════╝
-```
-
-## 🔧 Architecture
-
-### Layers of the system
-
-```
-┌─────────────────────────────────┐
-│      User Applications          │
-├─────────────────────────────────┤
-│     liblightos (stdlib)         │
-├─────────────────────────────────┤
-│      System Calls API           │
-├─────────────────────────────────┤
-│  Process Manager | VFS | Network│
-├─────────────────────────────────┤
-│   Memory Manager | Scheduler    │
-├─────────────────────────────────┤
-│    Interrupt Handlers | Drivers │
-├─────────────────────────────────┤
-│         Hardware (x86_64)       │
-└─────────────────────────────────┘
-```
-
-### Main components
-
-1. **Boot** - Bootloader via crate bootloader
-2. **Memory** - Paging, heap allocation
-3. **Interrupts** - IDT, exception handling
-4. **Processes** - Round-robin scheduler
-5. **Syscalls** - Userspace API
-6. **Drivers** - VGA, Serial, Keyboard
-7. **Package Manager** - LOS ecosystem
-
-## 📊 Performance
-
-- **Download Time**: ~100ms
-- **Memory Usage**: ~4MB (core)
-- **Context switch**: ~1 microns
-- **Process support**: up to 1024
-
-## 🗺️ Roadmap
-
-### v0.2.0
-- [ ] FAT32 file system
-- [ ] ELF loader for userspace
-- [ ] Network stack (TCP/IP)
-- [ ] USB support
-
-### v0.3.0
-- [ ] GUI framework
-- [ ] Multithreading (threads)
-- [ ] SMP (multi-core)
-- [ ] Advanced scheduler
-
-### v1.0.0
-- [ ] Stable ABI
-- [ ] Full API Documentation
-- [ ] Official Package Repository
-- [ ] Package signing & verification
-
-## Publishing packages
-
-### Verification process
-
-1. **Package Sending**
-- Automatic security check
-   - Dependency analysis
-   - Code quality control
-
-2. **Review**
-- Manual code
-review - Functionality testing
-   - Checking documentation
-
-3. **Approval**
-   - Getting the "Verified" status
-   - Publication in the repository
-   - Notification of the author
-
-### Package Requirements
-
-✓ Works in a no_std environment  
-✓ Correct error handling  
-✓ Documented code  
-✓ All dependencies are specified  
-✓ License (MIT/Apache-2.0)  
-✓ Secure code (no unsafe where possible)
-
-## 📝 License
-
-MIT License - see the LICENSE file
-
-## , The authors
-
-- **LightOS Team (NEXA Laboratories)** - Main Development
-- **Community** - Third-party packages
-
-## 🔗 Links
-
-- [API Documentation](https://docs.lightos.org )
-- [Package Repository](https://packages.lightos.org )
-- [GitHub](https://github.com/NEXA-Laboratories/LightOS )
-- [Discord Community](https://discord.gg/AQXVHsXmEe )
-
----
-
-**LightOS** - The future begins here! 🚀
+MIT License. LightOS Team (NEXA Laboratories).
