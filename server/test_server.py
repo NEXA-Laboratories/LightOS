@@ -22,7 +22,7 @@ class Core(unittest.TestCase):
 
     def test_seed_repo(self):
         names = [p.manifest.name for p in self.repo.all()]
-        self.assertEqual(names, ["demo-app", "hello-elf", "los-core", "los-edit", "los-net", "los-shell"])
+        self.assertEqual(names, ["crash-elf", "demo-app", "hello-elf", "los-core", "los-desktop", "los-edit", "los-net", "los-shell", "priv-elf", "spin-elf"])
         self.assertFalse(self.repo.get("demo-app").manifest.verified)
         self.assertTrue(self.repo.get("los-core").manifest.verified)
 
@@ -66,7 +66,7 @@ class Core(unittest.TestCase):
     def test_bridge_protocol(self):
         lines = S.bridge_reply(self.repo, "LIST")
         self.assertEqual(lines[-1], "END")
-        self.assertEqual(len(lines), 7)
+        self.assertEqual(len(lines), 11)
         f = lines[0].split("|")
         self.assertEqual((f[0], len(f)), ("PKG", 9))
         get = S.bridge_reply(self.repo, "GET los-edit")[0]
@@ -108,8 +108,12 @@ class Live(unittest.TestCase):
     def test_http_flow(self):
         self.assertEqual(self.req("GET", "/health")[0], 200)
         c, b = self.req("GET", "/api/v1/packages")
-        self.assertEqual(len(json.loads(b)), 6)
+        self.assertEqual(len(json.loads(b)), 10)
         self.assertEqual(self.req("GET", "/api/v1/packages/los-core/payload")[1], self.repo.get("los-core").payload)
+        c, txt = self.req("GET", "/api/v1/index.txt")
+        self.assertEqual(c, 200)
+        self.assertEqual(len(txt.strip().split("\n")), 10)
+        self.assertTrue(all(l.startswith("PKG|") and len(l.split("|")) == 9 for l in txt.strip().split("\n")))
         self.assertEqual(self.req("GET", "/api/v1/packages/zzz")[0], 404)
         self.assertEqual(json.loads(self.req("GET", "/api/v1/search?q=net")[1])[0]["name"], "los-net")
         sub = open(os.path.join(REPO, "..", "examples", "hello-app", "package.toml")).read() + "\n---payload---\nno_std hello\n"
@@ -131,7 +135,7 @@ class Live(unittest.TestCase):
             got.append(line)
             if line == "END":
                 break
-        self.assertEqual(len(got), 7)
+        self.assertEqual(len(got), 11)
         s.close()
 
 if __name__ == "__main__":

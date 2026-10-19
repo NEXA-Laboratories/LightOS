@@ -4,7 +4,7 @@ use lazy_static::lazy_static;
 use pic8259::ChainedPics;
 use x86_64::instructions::port::Port;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
-use x86_64::VirtAddr;
+use x86_64::{PrivilegeLevel, VirtAddr};
 
 pub const PIC_1_OFFSET: u8 = 32;
 pub const PIC_2_OFFSET: u8 = PIC_1_OFFSET + 8;
@@ -39,7 +39,9 @@ lazy_static! {
             idt.double_fault
                 .set_handler_fn(double_fault_handler)
                 .set_stack_index(gdt::DOUBLE_FAULT_IST_INDEX);
-            idt[SYSCALL_VECTOR].set_handler_addr(VirtAddr::new(syscall::entry_addr()));
+            idt[SYSCALL_VECTOR]
+                .set_handler_addr(VirtAddr::new(syscall::entry_addr()))
+                .set_privilege_level(PrivilegeLevel::Ring3); // ring 3 apps may use int 0x80
         }
         idt[InterruptIndex::Timer.as_u8()].set_handler_fn(timer_interrupt_handler);
         idt[InterruptIndex::Keyboard.as_u8()].set_handler_fn(keyboard_interrupt_handler);
@@ -63,7 +65,15 @@ pub fn init_pit(hz: u32) {
     }
 }
 
+/// Did this exception/interrupt come from ring 3 code?
+fn from_user(sf: &InterruptStackFrame) -> bool {
+    sf.code_segment.rpl() == PrivilegeLevel::Ring3
+}
+
 extern "x86-interrupt" fn divide_error_handler(stack_frame: InterruptStackFrame) {
+    if from_user(&stack_frame) {
+        crate::elf::user_fault("divide error", 0, stack_frame.instruction_pointer.as_u64());
+    }
     panic!("EXCEPTION: DIVIDE ERROR\n{:#?}", stack_frame);
 }
 
@@ -72,10 +82,16 @@ extern "x86-interrupt" fn breakpoint_handler(stack_frame: InterruptStackFrame) {
 }
 
 extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFrame) {
+    if from_user(&stack_frame) {
+        crate::elf::user_fault("invalid instruction", 0, stack_frame.instruction_pointer.as_u64());
+    }
     panic!("EXCEPTION: INVALID OPCODE\n{:#?}", stack_frame);
 }
 
 extern "x86-interrupt" fn general_protection_handler(stack_frame: InterruptStackFrame, error_code: u64) {
+    if from_user(&stack_frame) {
+        crate::elf::user_fault("general protection fault (forbidden instruction)", error_code, stack_frame.instruction_pointer.as_u64());
+    }
     panic!("EXCEPTION: GENERAL PROTECTION FAULT (code {})\n{:#?}", error_code, stack_frame);
 }
 
@@ -95,6 +111,9 @@ extern "x86-interrupt" fn double_fault_handler(stack_frame: InterruptStackFrame,
 
 extern "x86-interrupt" fn page_fault_handler(stack_frame: InterruptStackFrame, error_code: PageFaultErrorCode) {
     use x86_64::registers::control::Cr2;
+    if from_user(&stack_frame) {
+        crate::elf::user_fault("page fault", Cr2::read_raw(), stack_frame.instruction_pointer.as_u64());
+    }
     println!("EXCEPTION: PAGE FAULT");
     println!("Accessed address: {:?}", Cr2::read());
     println!("Error code: {:?}", error_code);
@@ -102,10 +121,14 @@ extern "x86-interrupt" fn page_fault_handler(stack_frame: InterruptStackFrame, e
     hlt_loop();
 }
 
-extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFrame) {
+extern "x86-interrupt" fn timer_interrupt_handler(stack_frame: InterruptStackFrame) {
     process::on_tick();
     unsafe {
         PICS.lock().notify_end_of_interrupt(InterruptIndex::Timer.as_u8());
+    }
+    // Ctrl+C / Esc kills a user app that is hogging the CPU
+    if from_user(&stack_frame) && crate::elf::user_should_stop() {
+        crate::elf::user_abort("stopped by Ctrl+C / Esc");
     }
 }
 

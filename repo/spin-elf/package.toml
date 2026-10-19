@@ -1,0 +1,10 @@
+[package]
+name = "spin-elf"
+version = "0.5.0"
+description = "Ring 3 demo: loops forever, stop with Ctrl+C"
+author = "LightOS Team"
+license = "MIT"
+verified = true
+
+[dependencies]
+los-core = "0.1.0"

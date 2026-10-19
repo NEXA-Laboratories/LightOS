@@ -1,0 +1,10 @@
+[package]
+name = "los-desktop"
+version = "0.4.3"
+description = "Text-mode desktop environment"
+author = "LightOS Team"
+license = "MIT"
+verified = true
+
+[dependencies]
+los-core = "0.1.0"

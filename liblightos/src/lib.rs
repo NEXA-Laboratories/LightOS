@@ -9,6 +9,8 @@ pub const SYS_GETPID: u64 = 2;
 pub const SYS_EXIT: u64 = 3;
 pub const SYS_YIELD: u64 = 4;
 pub const SYS_UPTIME: u64 = 5;
+pub const SYS_GETCHAR: u64 = 6;
+pub const SYS_SLEEP: u64 = 7;
 pub const SYS_LOS_INSTALL: u64 = 10;
 pub const SYS_LOS_REMOVE: u64 = 11;
 pub const SYS_LOS_LIST: u64 = 12;
@@ -41,6 +43,14 @@ pub fn sys_yield() {
 /// Timer ticks since boot (100 per second).
 pub fn sys_uptime() -> u64 {
     syscall(SYS_UPTIME, 0, 0, 0)
+}
+/// Block until a key is typed; returns its ASCII code (3 = Ctrl+C).
+pub fn sys_getchar() -> u8 {
+    syscall(SYS_GETCHAR, 0, 0, 0) as u8
+}
+/// Sleep for `ms` milliseconds (max 10 s per call).
+pub fn sys_sleep_ms(ms: u64) {
+    syscall(SYS_SLEEP, ms, 0, 0);
 }
 pub fn sys_los_install(name: *const u8, len: usize) -> u64 {
     syscall(SYS_LOS_INSTALL, name as u64, len as u64, 0)

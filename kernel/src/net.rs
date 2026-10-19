@@ -16,6 +16,14 @@ static CFG: Mutex<Cfg> = Mutex::new(Cfg { ip: [10, 0, 2, 15], mask: [255, 255, 2
 static ARP: Mutex<Vec<([u8; 4], [u8; 6])>> = Mutex::new(Vec::new());
 static REPLY: Mutex<Option<(u16, u64)>> = Mutex::new(None); // (icmp seq, tick when received)
 static IP_ID: AtomicU16 = AtomicU16::new(1);
+static DNS: Mutex<[u8; 4]> = Mutex::new([10, 0, 2, 3]);
+
+pub struct UdpMsg {
+    pub data: Vec<u8>,
+    pub src: [u8; 4],
+    pub sport: u16,
+}
+static UDP_SOCKS: Mutex<Vec<(u16, Vec<UdpMsg>)>> = Mutex::new(Vec::new());
 
 const PING_ID: u16 = 0x4C53;
 
@@ -48,11 +56,30 @@ pub fn set_config(ip: [u8; 4], mask: [u8; 4], gw: [u8; 4]) {
     ARP.lock().clear();
 }
 
+pub fn dns() -> [u8; 4] {
+    *DNS.lock()
+}
+pub fn set_dns(ip: [u8; 4]) {
+    *DNS.lock() = ip;
+}
+pub fn my_ip() -> [u8; 4] {
+    CFG.lock().ip
+}
+
+/// Send an IP datagram to `dst` (ARP-resolving the next hop).
+pub fn ip_send(proto: u8, dst: [u8; 4], payload: &[u8]) -> Result<(), String> {
+    send_ip(proto, dst, payload, None)
+}
+
+pub fn mac() -> Option<[u8; 6]> {
+    e1000::with(|n| n.mac)
+}
+
 pub fn arp_table() -> Vec<([u8; 4], [u8; 6])> {
     ARP.lock().clone()
 }
 
-fn csum(data: &[u8]) -> u16 {
+pub(crate) fn csum(data: &[u8]) -> u16 {
     let mut sum: u32 = 0;
     let mut i = 0;
     while i + 1 < data.len() {
@@ -104,7 +131,12 @@ fn send_arp(op: u16, target_mac: [u8; 6], target_ip: [u8; 4]) -> Result<(), Stri
     tx(&f)
 }
 
-fn wait_tick() {
+/// Ctrl+C pressed?
+pub fn cancelled() -> bool {
+    crate::keyboard::cancel_requested()
+}
+
+pub fn wait_tick() {
     x86_64::instructions::interrupts::enable_and_hlt();
 }
 
@@ -116,6 +148,9 @@ fn arp_resolve(ip: [u8; 4]) -> Result<[u8; 6], String> {
         send_arp(1, [0; 6], ip)?;
         let start = process::ticks();
         while process::ticks() - start < 30 {
+            if cancelled() {
+                return Err("cancelled".to_string());
+            }
             poll();
             if let Some(m) = ARP.lock().iter().find(|e| e.0 == ip).map(|e| e.1) {
                 return Ok(m);
@@ -136,6 +171,10 @@ fn send_ip(proto: u8, dst: [u8; 4], payload: &[u8], dst_mac: Option<[u8; 6]>) ->
         Some(m) => m,
         None => arp_resolve(next_hop)?,
     };
+    send_ip_raw(proto, src, dst, payload, mac)
+}
+
+fn send_ip_raw(proto: u8, src: [u8; 4], dst: [u8; 4], payload: &[u8], mac: [u8; 6]) -> Result<(), String> {
     let me = my_mac()?;
     let total = 20 + payload.len();
     let mut f: Vec<u8> = Vec::with_capacity(14 + total);
@@ -158,6 +197,52 @@ fn send_ip(proto: u8, dst: [u8; 4], payload: &[u8], dst_mac: Option<[u8; 6]>) ->
     tx(&f)
 }
 
+// ------------------------------------------------------------------ UDP
+
+pub fn udp_listen(port: u16) {
+    let mut s = UDP_SOCKS.lock();
+    if !s.iter().any(|x| x.0 == port) {
+        s.push((port, Vec::new()));
+    }
+}
+
+pub fn udp_close(port: u16) {
+    UDP_SOCKS.lock().retain(|x| x.0 != port);
+}
+
+pub fn udp_recv(port: u16) -> Option<UdpMsg> {
+    let mut s = UDP_SOCKS.lock();
+    let q = s.iter_mut().find(|x| x.0 == port)?;
+    if q.1.is_empty() {
+        None
+    } else {
+        Some(q.1.remove(0))
+    }
+}
+
+fn udp_listening(port: u16) -> bool {
+    UDP_SOCKS.lock().iter().any(|x| x.0 == port)
+}
+
+fn udp_packet(sport: u16, dport: u16, payload: &[u8]) -> Vec<u8> {
+    let mut u = Vec::with_capacity(8 + payload.len());
+    u.extend_from_slice(&sport.to_be_bytes());
+    u.extend_from_slice(&dport.to_be_bytes());
+    u.extend_from_slice(&((8 + payload.len()) as u16).to_be_bytes());
+    u.extend_from_slice(&[0, 0]); // checksum optional in IPv4
+    u.extend_from_slice(payload);
+    u
+}
+
+pub fn udp_send(dst: [u8; 4], sport: u16, dport: u16, payload: &[u8]) -> Result<(), String> {
+    send_ip(17, dst, &udp_packet(sport, dport, payload), None)
+}
+
+/// Broadcast with an explicit source address (DHCP uses 0.0.0.0 before it has a lease).
+pub fn udp_send_broadcast(src: [u8; 4], sport: u16, dport: u16, payload: &[u8]) -> Result<(), String> {
+    send_ip_raw(17, src, [255; 4], &udp_packet(sport, dport, payload), [0xFF; 6])
+}
+
 fn handle(f: &[u8]) {
     let my_ip = CFG.lock().ip;
     match u16::from_be_bytes([f[12], f[13]]) {
@@ -178,34 +263,50 @@ fn handle(f: &[u8]) {
             if ihl < 20 || 14 + total > f.len() || total < ihl + 8 {
                 return;
             }
+            let proto = f[23];
             let dst = &f[30..34];
-            if dst != my_ip && dst != [255u8, 255, 255, 255] {
+            let body = &f[14 + ihl..14 + total];
+            let udp_port = u16::from_be_bytes([body[2], body[3]]);
+            let for_us = dst == my_ip || dst == [255u8, 255, 255, 255];
+            if !for_us && !(proto == 17 && udp_listening(udp_port)) {
                 return;
             }
-            if f[23] != 1 {
-                return; // only ICMP so far
-            }
-            let icmp = &f[14 + ihl..14 + total];
             let mut src = [0u8; 4];
             src.copy_from_slice(&f[26..30]);
             let mut smac = [0u8; 6];
             smac.copy_from_slice(&f[6..12]);
-            match icmp[0] {
-                8 => {
-                    // echo request -> echo reply with the same payload
-                    let mut r = icmp.to_vec();
-                    r[0] = 0;
-                    r[2] = 0;
-                    r[3] = 0;
-                    let c = csum(&r);
-                    r[2..4].copy_from_slice(&c.to_be_bytes());
-                    let _ = send_ip(1, src, &r, Some(smac));
-                }
-                0 => {
-                    let id = u16::from_be_bytes([icmp[4], icmp[5]]);
-                    let seq = u16::from_be_bytes([icmp[6], icmp[7]]);
-                    if id == PING_ID {
-                        *REPLY.lock() = Some((seq, process::ticks()));
+            match proto {
+                1 => match body[0] {
+                    8 => {
+                        // echo request -> echo reply with the same payload
+                        let mut r = body.to_vec();
+                        r[0] = 0;
+                        r[2] = 0;
+                        r[3] = 0;
+                        let c = csum(&r);
+                        r[2..4].copy_from_slice(&c.to_be_bytes());
+                        let _ = send_ip(1, src, &r, Some(smac));
+                    }
+                    0 => {
+                        let id = u16::from_be_bytes([body[4], body[5]]);
+                        let seq = u16::from_be_bytes([body[6], body[7]]);
+                        if id == PING_ID {
+                            *REPLY.lock() = Some((seq, process::ticks()));
+                        }
+                    }
+                    _ => {}
+                },
+                6 => crate::tcp::on_segment(src, body),
+                17 => {
+                    let sport = u16::from_be_bytes([body[0], body[1]]);
+                    let len = (u16::from_be_bytes([body[4], body[5]]) as usize).min(body.len());
+                    if len >= 8 {
+                        let mut socks = UDP_SOCKS.lock();
+                        if let Some(q) = socks.iter_mut().find(|x| x.0 == udp_port) {
+                            if q.1.len() < 8 {
+                                q.1.push(UdpMsg { data: body[8..len].to_vec(), src, sport });
+                            }
+                        }
                     }
                 }
                 _ => {}
@@ -234,6 +335,10 @@ pub fn ping(dst: [u8; 4], count: u32) {
     println!("PING {} with 32 bytes of data:", fmt_ip(dst));
     let mut got = 0;
     for seq in 1..=count {
+        if cancelled() {
+            println!("^C");
+            break;
+        }
         *REPLY.lock() = None;
         let mut icmp = [0u8; 40];
         icmp[0] = 8;
@@ -251,6 +356,9 @@ pub fn ping(dst: [u8; 4], count: u32) {
         }
         let mut replied = false;
         while process::ticks() - t0 < 100 {
+            if cancelled() {
+                break;
+            }
             poll();
             let r = *REPLY.lock();
             if let Some((s, t)) = r {
@@ -269,6 +377,10 @@ pub fn ping(dst: [u8; 4], count: u32) {
             wait_tick();
         }
         if !replied {
+            if cancelled() {
+                println!("^C");
+                break;
+            }
             println!("Request timed out (seq={}).", seq);
         }
         if seq < count {

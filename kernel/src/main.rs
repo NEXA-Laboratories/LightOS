@@ -1,4 +1,4 @@
-//! LightOS 0.4.0 - kernel entry point.
+//! LightOS 0.5.0 - kernel entry point.
 #![no_std]
 #![no_main]
 #![feature(abi_x86_interrupt)]
@@ -12,11 +12,16 @@ mod serial;
 mod allocator;
 mod animation;
 mod ata;
+mod dhcp;
+mod desktop;
+mod dns;
 mod e1000;
+mod edition;
 mod editor;
 mod elf;
 mod fat32;
 mod gdt;
+mod http;
 mod installer;
 mod interrupts;
 mod keyboard;
@@ -29,6 +34,7 @@ mod memory;
 mod process;
 mod shell;
 mod syscall;
+mod tcp;
 mod ui;
 
 use bootloader::{entry_point, BootInfo};
@@ -36,7 +42,7 @@ use alloc::format;
 use core::panic::PanicInfo;
 use vga_buffer::Color;
 
-pub const VERSION: &str = "0.4.0";
+pub const VERSION: &str = "0.5.0";
 
 entry_point!(kernel_main);
 
@@ -84,7 +90,18 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
         Err(e) => boot_note(&format!("{}; packages will not persist (see 'disks', 'install')", e)),
     }
     match e1000::probe() {
-        Ok(msg) => boot_ok(&msg),
+        Ok(msg) => {
+            boot_ok(&msg);
+            if e1000::wait_link(6000) {
+                boot_ok("network link up");
+                match dhcp::run(2, 150) {
+                    Ok(m) => boot_ok(&m),
+                    Err(e) => boot_note(&format!("DHCP: {} (using the default 10.0.2.15)", e)),
+                }
+            } else {
+                boot_note("network link is down (is the cable connected in the VM settings?)");
+            }
+        }
         Err(e) => boot_note(&format!("network: {}", e)),
     }
     process::init();

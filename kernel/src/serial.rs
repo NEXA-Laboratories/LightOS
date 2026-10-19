@@ -35,16 +35,29 @@ macro_rules! serial_println {
     ($($arg:tt)*) => ($crate::serial_print!("{}\n", format_args!($($arg)*)));
 }
 
+fn lsr() -> u8 {
+    unsafe { Port::<u8>::new(COM1 + 5).read() }
+}
+
+/// False when no UART is attached (the line status register then reads 0xFF).
+pub fn present() -> bool {
+    lsr() != 0xFF
+}
+
 /// True if a byte is waiting in the receive register.
 pub fn data_ready() -> bool {
-    unsafe { Port::<u8>::new(COM1 + 5).read() & 1 != 0 }
+    let v = lsr();
+    v != 0xFF && v & 1 != 0
 }
 
 /// Poll for one byte; `spins` bounds the wait.
 pub fn read_byte(spins: u32) -> Option<u8> {
-    for _ in 0..spins {
+    for i in 0..spins {
         if data_ready() {
             return Some(unsafe { Port::<u8>::new(COM1).read() });
+        }
+        if i & 0x3FFF == 0 && crate::keyboard::cancel_requested() {
+            return None;
         }
         core::hint::spin_loop();
     }
@@ -69,7 +82,10 @@ pub fn read_line(spins: u32) -> Option<String> {
 
 /// Discard any pending input.
 pub fn drain() {
-    while data_ready() {
+    for _ in 0..4096 {
+        if !data_ready() {
+            break;
+        }
         unsafe {
             Port::<u8>::new(COM1).read();
         }

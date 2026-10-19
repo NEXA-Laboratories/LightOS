@@ -414,6 +414,66 @@ fn load_db(st: &mut State) {
     }
 }
 
+pub struct CatalogEntry {
+    pub name: String,
+    pub version: String,
+    pub verified: bool,
+    pub installed: bool,
+    pub description: String,
+}
+
+/// Every package in the current index, with its installed state (for the desktop's package manager).
+pub fn catalog() -> Vec<CatalogEntry> {
+    let st = STATE.lock();
+    st.index
+        .values()
+        .map(|m| CatalogEntry {
+            name: m.name.clone(),
+            version: m.version.clone(),
+            verified: m.verified,
+            installed: st.installed.contains_key(&m.name),
+            description: m.description.clone(),
+        })
+        .collect()
+}
+
+/// Package-database lines (same format as persist) for a built-in package and its built-in dependencies.
+/// The installer uses this to pre-install packages on a new disk.
+pub fn db_lines_for(name: &str) -> Vec<String> {
+    fn walk(n: &str, out: &mut Vec<String>) {
+        if out.iter().any(|x| x == n) {
+            return;
+        }
+        if let Some(b) = repo::BUILTIN.iter().find(|b| b.name == n) {
+            for d in b.deps {
+                walk(d, out);
+            }
+            out.push(n.to_string());
+        }
+    }
+    let mut order: Vec<String> = Vec::new();
+    walk(name, &mut order);
+    order
+        .iter()
+        .filter_map(|n| repo::BUILTIN.iter().find(|b| b.name == n.as_str()))
+        .map(|b| {
+            let m = b.to_meta();
+            format!(
+                "{}|{}|{}|{}|{}|{}|{:016x}|b|{}|0|{}",
+                m.name,
+                m.version,
+                m.author,
+                m.description,
+                if m.verified { 1 } else { 0 },
+                m.deps.join(","),
+                m.hash,
+                if m.name == name { 1 } else { 0 },
+                remote::escape(b.payload)
+            )
+        })
+        .collect()
+}
+
 pub fn is_installed(name: &str) -> bool {
     STATE.lock().installed.contains_key(name)
 }
@@ -473,7 +533,8 @@ fn usage() {
     println!("  los remove <pkg>...    remove packages (--force ignores dependents)");
     println!("  los list               list installed packages");
     println!("  los search <query>     search name/description");
-    println!("  los update             sync index from los-server (COM1)");
+    println!("  los update             sync index from los-server (HTTP, falls back to COM1)");
+    println!("  los server [ip[:port]] show/set the los-server address (default 10.0.2.2:8080)");
     println!("  los available          show the current index");
     println!("  los info <pkg>         package details");
     println!("  los verify [pkg]       re-check installed checksums");
@@ -526,10 +587,10 @@ pub fn command(args: &[&str]) {
             available();
         }
         "update" | "sync" => {
-            info_line("Contacting los-server on COM1 ...");
+            info_line("Contacting los-server (network, then COM1) ...");
             match update() {
                 Ok(n) => {
-                    ok(&format!("Repository updated: {} package(s) from los-server", n));
+                    ok(&format!("Repository updated: {} package(s) from los-server ({})", n, remote::transport()));
                     available();
                 }
                 Err(e) => {
@@ -538,6 +599,25 @@ pub fn command(args: &[&str]) {
                 }
             }
         }
+        "server" => match pos.first() {
+            Some(a) => {
+                let (h, p) = match a.rsplit_once(':') {
+                    Some((h, p)) => (h, p.parse::<u16>().ok()),
+                    None => (*a, Some(8080)),
+                };
+                match (crate::net::parse_ip(h), p) {
+                    (Some(ip), Some(port)) => {
+                        remote::set_server(ip, port);
+                        ok(&format!("los-server is now {}:{}", crate::net::fmt_ip(ip), port));
+                    }
+                    _ => println!("usage: los server <a.b.c.d[:port]>"),
+                }
+            }
+            None => {
+                let (ip, port) = remote::server();
+                println!("los-server: {}:{}  (last used: {})", crate::net::fmt_ip(ip), port, remote::transport());
+            }
+        },
         "info" => match pos.first() {
             Some(p) => report(info(p)),
             None => println!("usage: los info <package>"),

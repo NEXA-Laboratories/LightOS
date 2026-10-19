@@ -1,0 +1,2 @@
+los-desktop 0.4.3
+text-mode desktop: menu bar, files, packages, system, power

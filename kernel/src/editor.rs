@@ -108,6 +108,7 @@ pub fn edit(path: &str) -> Result<(), String> {
         Err(e) if e.contains("not found") => alloc::vec![String::new()],
         Err(e) => return Err(e),
     };
+    keyboard::flush();
     let mut ed = Ed { lines, row: 0, col: 0, top: 0, left: 0, dirty: false, armed: false, path: String::from(path), msg: String::new() };
     ed.msg = String::from(if ed.lines.len() == 1 && ed.lines[0].is_empty() { "new file" } else { "" });
 

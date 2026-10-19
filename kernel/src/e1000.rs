@@ -262,10 +262,24 @@ pub fn probe() -> Result<String, String> {
     let nic = E1000::init(d)?;
     let m = nic.mac;
     let msg = format!(
-        "network: Intel e1000 {:04x}:{:04x} MAC {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}, link {}",
-        d.vendor, d.device, m[0], m[1], m[2], m[3], m[4], m[5],
-        if nic.link_up() { "up" } else { "down" }
+        "network: Intel e1000 {:04x}:{:04x} MAC {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+        d.vendor, d.device, m[0], m[1], m[2], m[3], m[4], m[5]
     );
     *NIC.lock() = Some(nic);
     Ok(msg)
+}
+
+/// Wait for the link to come up (VirtualBox delays it by ~3 s after a reset).
+pub fn wait_link(timeout_ms: u64) -> bool {
+    let mut waited = 0;
+    loop {
+        if with(|n| n.link_up()).unwrap_or(false) {
+            return true;
+        }
+        if waited >= timeout_ms {
+            return false;
+        }
+        sleep_ms(50);
+        waited += 50;
+    }
 }

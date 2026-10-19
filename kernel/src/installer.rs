@@ -2,7 +2,7 @@
 use crate::ata::{self, Disk, SECTOR};
 use crate::fat32::{self, Fat32};
 use crate::mbr::{self, Layout, Table, SYSTEM_AREA, TYPE_FAT32};
-use crate::{shell, ui};
+use crate::{los, shell, ui};
 use alloc::{format, string::{String, ToString}, vec::Vec};
 
 const MIN_INSTALL_SECTORS: u32 = SYSTEM_AREA + 40 * 2048;
@@ -256,6 +256,18 @@ fn install(idx: usize) -> Result<(), String> {
     if fat32::current_disk().is_some() && fat32::current_disk() != Some(idx) {
         println!("  data:      the mounted volume's files (packages, apps) will be copied");
     }
+    println!();
+    println!("Choose the edition to install:");
+    println!("  1) Console - text shell only");
+    println!("  2) Desktop - text-mode desktop (menu, file manager, package manager) plus the shell");
+    let desktop = loop {
+        match shell::ask("Edition [1/2, Enter = 1]").trim() {
+            "" | "1" => break false,
+            "2" => break true,
+            _ => println!("please type 1 or 2"),
+        }
+    };
+    println!("  edition:   {}", if desktop { "Desktop" } else { "Console" });
     if !shell::confirm("ALL DATA on that partition is lost. Type YES to install") {
         return Err(String::from("cancelled"));
     }
@@ -313,6 +325,20 @@ fn install(idx: usize) -> Result<(), String> {
     }
     dfs.write_file("/LOS/INSTALL.TXT", format!("LightOS {} installed\n", crate::VERSION).as_bytes())?;
     println!("Copied {} file(s) from the live volume.", copied);
+
+    // edition: marker file, plus the los-desktop package for the Desktop edition
+    if desktop {
+        let mut db = dfs.read_file("/LOS/DB.TXT").map(|d| String::from_utf8_lossy(&d).to_string()).unwrap_or_default();
+        for line in los::db_lines_for("los-desktop") {
+            let name = line.split('|').next().unwrap_or("").to_string();
+            if !db.lines().any(|l| l.split('|').next() == Some(name.as_str())) {
+                db.push_str(&line);
+                db.push('\n');
+            }
+        }
+        dfs.write_file("/LOS/DB.TXT", db.as_bytes())?;
+    }
+    dfs.write_file("/LOS/EDITION.TXT", format!("{}\n", if desktop { "desktop" } else { "console" }).as_bytes())?;
 
     println!();
     println!("Installation complete.");

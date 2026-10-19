@@ -9,6 +9,8 @@ pub const SYS_GETPID: u64 = 2;
 pub const SYS_EXIT: u64 = 3; // (code)
 pub const SYS_YIELD: u64 = 4;
 pub const SYS_UPTIME: u64 = 5; // timer ticks
+pub const SYS_GETCHAR: u64 = 6; // blocks until a key is typed (3 = Ctrl+C)
+pub const SYS_SLEEP: u64 = 7; // (milliseconds)
 pub const SYS_LOS_INSTALL: u64 = 10; // (name_ptr, name_len)
 pub const SYS_LOS_REMOVE: u64 = 11; // (name_ptr, name_len)
 pub const SYS_LOS_LIST: u64 = 12; // () -> number of installed packages
@@ -62,6 +64,10 @@ fn str_arg(ptr: u64, len: u64) -> Option<&'static str> {
     if ptr == 0 || len == 0 || len > 4096 {
         return None;
     }
+    // A ring-3 app may only pass pointers into its own mapped memory.
+    if crate::elf::is_running() && !crate::elf::user_range_ok(ptr, len) {
+        return None;
+    }
     let bytes = unsafe { core::slice::from_raw_parts(ptr as *const u8, len as usize) };
     core::str::from_utf8(bytes).ok()
 }
@@ -90,6 +96,19 @@ pub extern "C" fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64) -> u64 {
             0
         }
         SYS_YIELD => 0,
+        SYS_GETCHAR => loop {
+            if let Some(c) = crate::keyboard::poll_char() {
+                return c as u64;
+            }
+            if crate::keyboard::cancel_requested() {
+                return 3;
+            }
+            x86_64::instructions::interrupts::enable_and_hlt();
+        },
+        SYS_SLEEP => {
+            process::sleep_ms(a1.min(10_000));
+            0
+        }
         SYS_UPTIME => process::ticks(),
         SYS_LOS_INSTALL => match str_arg(a1, a2) {
             Some(name) => match los::install(name) {

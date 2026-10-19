@@ -28,7 +28,7 @@ controller with **live.vdi = primary master** and **target.vdi = primary slave**
 ## Installing
 ```
 los> disks                 # disk 0 = live medium, disk 1 = empty target
-los> install 1             # type YES when asked
+los> install 1             # asks for the edition (1 Console / 2 Desktop), then type YES
 los> shutdown
 ```
 `install` writes the bootloader+kernel to the first 8 MiB of disk 1, creates an MBR partition table

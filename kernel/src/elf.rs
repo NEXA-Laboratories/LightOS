@@ -1,23 +1,35 @@
-//! ELF64 loader + launcher.
+//! ELF64 loader + ring-3 launcher.
 //!
-//! 0.2.0 loads static x86_64 ET_EXEC binaries into a dedicated region of the kernel address
-//! space and runs them in ring 0 on their own stack. Apps talk to the kernel through the same
-//! `int 0x80` ABI as everything else; sys_exit unwinds back to the shell.
-//! (Ring-3 isolation is planned for a later release.)
-use crate::{memory, process};
-use alloc::{format, string::String};
+//! Static x86_64 ET_EXEC binaries are loaded into the user region (4 TiB, `APP_BASE`) with the
+//! USER flag set on their pages only, then entered in ring 3 with `iretq`. Apps reach the kernel
+//! through `int 0x80`; kernel memory is supervisor-only, so a stray or hostile access is a page
+//! fault that kills just the app. Ctrl+C / Esc also kills a running app (timer tick check).
+use crate::{gdt, keyboard, memory, process};
+use alloc::{format, string::String, vec::Vec};
 use core::arch::global_asm;
 use core::sync::atomic::{AtomicBool, Ordering};
+use spin::Mutex;
 
-pub const APP_BASE: u64 = 0x0000_0100_0000_0000;
+pub const APP_BASE: u64 = 0x0000_0400_0000_0000;
 pub const APP_CODE_MAX: u64 = 16 * 1024 * 1024;
 const STACK_SIZE: u64 = 64 * 1024;
 pub const STACK_TOP: u64 = APP_BASE + APP_CODE_MAX + STACK_SIZE;
 
 static RUNNING: AtomicBool = AtomicBool::new(false);
+/// Memory the running app owns (page-aligned [start, end) ranges); used to validate syscall pointers.
+static RANGES: Mutex<Vec<(u64, u64)>> = Mutex::new(Vec::new());
 
 pub fn is_running() -> bool {
     RUNNING.load(Ordering::SeqCst)
+}
+
+/// May a syscall of the running app touch [ptr, ptr+len)?
+pub fn user_range_ok(ptr: u64, len: u64) -> bool {
+    let end = match ptr.checked_add(len) {
+        Some(e) => e,
+        None => return false,
+    };
+    RANGES.lock().iter().any(|&(s, e)| ptr >= s && end <= e)
 }
 
 pub struct Image {
@@ -45,7 +57,7 @@ struct Seg {
     filesz: u64,
 }
 
-/// Validate and load an ELF64 executable.
+/// Validate and load an ELF64 executable into the user region.
 pub fn load(d: &[u8]) -> Result<Image, String> {
     if d.len() < 64 || &d[0..4] != b"\x7fELF" {
         return Err(String::from("not an ELF file"));
@@ -68,7 +80,7 @@ pub fn load(d: &[u8]) -> Result<Image, String> {
     }
     if entry < APP_BASE || entry >= APP_BASE + APP_CODE_MAX {
         return Err(format!(
-            "entry point {:#x} is outside the app region ({:#x}..{:#x}); link with --image-base={:#x}",
+            "entry point {:#x} is outside the app region ({:#x}..{:#x}); relink with --image-base={:#x}",
             entry,
             APP_BASE,
             APP_BASE + APP_CODE_MAX,
@@ -76,7 +88,7 @@ pub fn load(d: &[u8]) -> Result<Image, String> {
         ));
     }
 
-    let mut segs: alloc::vec::Vec<Seg> = alloc::vec::Vec::new();
+    let mut segs: Vec<Seg> = Vec::new();
     for i in 0..phnum {
         let o = phoff + i * 56;
         if u32_at(d, o) != 1 {
@@ -94,14 +106,19 @@ pub fn load(d: &[u8]) -> Result<Image, String> {
         return Err(String::from("no loadable segments"));
     }
 
-    // Pass 1: map + zero whole pages (so .bss and stale data are clean).
+    // Pass 1: map as user memory + zero whole pages (so .bss and the previous app's data are gone).
+    let mut ranges: Vec<(u64, u64)> = Vec::new();
     for s in &segs {
         let start = s.vaddr & !0xFFF;
         let end = (s.vaddr + s.memsz + 0xFFF) & !0xFFF;
-        memory::map_region(start, (end - start) as usize)?;
+        memory::map_user_region(start, (end - start) as usize)?;
         unsafe { core::ptr::write_bytes(start as *mut u8, 0, (end - start) as usize) };
+        ranges.push((start, end));
     }
-    memory::map_region(STACK_TOP - STACK_SIZE, STACK_SIZE as usize)?;
+    let stack_start = STACK_TOP - STACK_SIZE;
+    memory::map_user_region(stack_start, STACK_SIZE as usize)?;
+    unsafe { core::ptr::write_bytes(stack_start as *mut u8, 0, STACK_SIZE as usize) };
+    ranges.push((stack_start, STACK_TOP));
 
     // Pass 2: copy file contents.
     let mut bytes = 0;
@@ -111,15 +128,39 @@ pub fn load(d: &[u8]) -> Result<Image, String> {
         }
         bytes += s.memsz as usize;
     }
+    *RANGES.lock() = ranges;
     Ok(Image { entry, segments: segs.len(), bytes })
 }
 
-// exec_enter(entry, stack_top) -> exit code
-// exec_leave(code)             -> never returns; resumes after exec_enter's caller
+// ------------------------------------------------------------------ ending an app early
+
+/// A ring-3 app faulted: report it and return to the shell. Never returns.
+pub fn user_fault(what: &str, addr: u64, rip: u64) -> ! {
+    println!("\n[app] crashed: {} (address {:#x}, instruction {:#x}) - process killed, the system is fine", what, addr, rip);
+    process::terminate_current(-11);
+    unsafe { exec_leave(-11) }
+}
+
+/// Kill the running app on request (Ctrl+C). Never returns.
+pub fn user_abort(reason: &str) -> ! {
+    println!("\n[app] {}", reason);
+    process::terminate_current(-9);
+    unsafe { exec_leave(-9) }
+}
+
+/// Checked from the timer interrupt while ring 3 code is running.
+pub fn user_should_stop() -> bool {
+    is_running() && keyboard::cancel_requested()
+}
+
+// exec_enter_user(entry, stack, cs, ss) -> exit code
+//   saves the callee-saved registers and the kernel stack pointer, then iretq's into ring 3.
+// exec_leave(code) -> never returns; resumes after the exec_enter_user call with eax = code.
+//   Used by sys_exit and by the fault/abort paths (they run on the kernel stack from the TSS).
 global_asm!(
     r#"
-    .global exec_enter
-exec_enter:
+    .global exec_enter_user
+exec_enter_user:
     push rbx
     push rbp
     push r12
@@ -127,11 +168,27 @@ exec_enter:
     push r14
     push r15
     mov [rip + EXEC_SP], rsp
-    mov rsp, rsi
-    xor ebp, ebp
-    call rdi
+    push rcx
+    push rsi
+    push 514
+    push rdx
+    push rdi
+    xor eax, eax
+    xor ebx, ebx
+    xor ecx, ecx
+    xor edx, edx
+    xor esi, esi
     xor edi, edi
-    jmp exec_leave
+    xor ebp, ebp
+    xor r8d, r8d
+    xor r9d, r9d
+    xor r10d, r10d
+    xor r11d, r11d
+    xor r12d, r12d
+    xor r13d, r13d
+    xor r14d, r14d
+    xor r15d, r15d
+    iretq
 
     .global exec_leave
 exec_leave:
@@ -152,11 +209,12 @@ exec_leave:
 static mut EXEC_SP: u64 = 0;
 
 extern "C" {
-    fn exec_enter(entry: u64, stack_top: u64) -> i32;
+    fn exec_enter_user(entry: u64, stack: u64, cs: u64, ss: u64) -> i32;
     pub fn exec_leave(code: i32) -> !;
 }
 
-/// Load `data` as an ELF app named `name`, run it to completion, return its exit code.
+/// Load `data` as an ELF app named `name`, run it in ring 3 to completion, return its exit code
+/// (negative if it was killed: -11 crashed, -9 stopped).
 pub fn exec(name: &str, data: &[u8]) -> Result<i32, String> {
     if RUNNING.swap(true, Ordering::SeqCst) {
         return Err(String::from("an application is already running"));
@@ -168,9 +226,11 @@ pub fn exec(name: &str, data: &[u8]) -> Result<i32, String> {
             return Err(e);
         }
     };
-    serial_println!("elf: {} loaded ({} segment(s), {} bytes), entry {:#x}", name, img.segments, img.bytes, img.entry);
+    serial_println!("elf: {} loaded ({} segment(s), {} bytes), entry {:#x}, ring 3", name, img.segments, img.bytes, img.entry);
+    let (cs, ss) = gdt::user_selectors();
     let pid = process::begin_external(name);
-    let code = unsafe { exec_enter(img.entry, STACK_TOP) };
+    keyboard::clear_cancel();
+    let code = unsafe { exec_enter_user(img.entry, STACK_TOP - 8, cs as u64, ss as u64) };
     process::end_external(pid, code);
     RUNNING.store(false, Ordering::SeqCst);
     Ok(code)

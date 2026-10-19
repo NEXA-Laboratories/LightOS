@@ -119,6 +119,36 @@ pub fn map_region(start: u64, len: usize) -> Result<(), String> {
     Ok(())
 }
 
+/// Map [start, start+len) for ring 3 (USER_ACCESSIBLE on the pages and on the page-table levels above them).
+/// Kernel memory never gets the flag, so user code cannot touch it. Existing pages are reused.
+pub fn map_user_region(start: u64, len: usize) -> Result<(), String> {
+    if len == 0 {
+        return Ok(());
+    }
+    let mut mg = MAPPER.lock();
+    let mut fg = FRAMES.lock();
+    let (mapper, frames) = match (mg.as_mut(), fg.as_mut()) {
+        (Some(m), Some(f)) => (m, f),
+        _ => return Err("memory manager not ready".to_string()),
+    };
+    let first = Page::<Size4KiB>::containing_address(VirtAddr::new(start));
+    let last = Page::<Size4KiB>::containing_address(VirtAddr::new(start + len as u64 - 1));
+    let leaf = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
+    for page in Page::range_inclusive(first, last) {
+        if mapper.translate_page(page).is_ok() {
+            continue;
+        }
+        let frame = frames.allocate_frame().ok_or_else(|| "out of physical memory".to_string())?;
+        unsafe {
+            mapper
+                .map_to_with_table_flags(page, frame, leaf, leaf, frames)
+                .map_err(|_| "user page mapping failed".to_string())?
+                .flush();
+        }
+    }
+    Ok(())
+}
+
 static MMIO_NEXT: AtomicU64 = AtomicU64::new(0x0000_0200_0000_0000);
 
 /// Map device registers (physical `phys`, `size` bytes) as uncached memory; returns the virtual address.

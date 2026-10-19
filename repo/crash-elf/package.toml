@@ -1,0 +1,10 @@
+[package]
+name = "crash-elf"
+version = "0.5.0"
+description = "Ring 3 demo: reads kernel memory and is killed"
+author = "LightOS Team"
+license = "MIT"
+verified = true
+
+[dependencies]
+los-core = "0.1.0"

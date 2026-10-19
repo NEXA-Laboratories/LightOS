@@ -27,7 +27,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlparse
 
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 MAX_PAYLOAD = 32 * 1024
 MAX_BODY = 256 * 1024
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,47}$")
@@ -297,6 +297,8 @@ def make_http_handler(repo: Repo, token: str):
                     return self._json(200, p.to_dict())
                 if len(parts) == 5 and parts[4] == "payload":
                     return self._send(200, p.payload, "text/plain")
+            if parts == ["api", "v1", "index.txt"]:
+                return self._send(200, "".join(p.index_line() + "\n" for p in repo.all()), "text/plain")
             if parts == ["api", "v1", "search"]:
                 q = parse_qs(u.query).get("q", [""])[0]
                 return self._json(200, [p.to_dict() for p in repo.search(q)])

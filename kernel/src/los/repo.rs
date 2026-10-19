@@ -75,11 +75,20 @@ pub const BUILTIN: &[Builtin] = &[
     },
     Builtin {
         name: "hello-elf",
-        version: "0.3.0",
+        version: "0.5.0",
         author: "LightOS Team",
         description: "Hello world ELF64 demo app",
         verified: true,
         deps: &["los-core"],
         payload: super::hello_elf::PAYLOAD,
+    },
+    Builtin {
+        name: "los-desktop",
+        version: "0.4.3",
+        author: "LightOS Team",
+        description: "Text-mode desktop environment",
+        verified: true,
+        deps: &["los-core"],
+        payload: "los-desktop 0.4.3\ntext-mode desktop: menu bar, files, packages, system, power\n",
     },
 ];
